@@ -3,7 +3,7 @@
 **Working name:** Pit (`pit`, short for “private Git”)  
 **Status:** Draft v0.1  
 **Date:** 2026-07-24  
-**Audience:** Product, CLI engineering, VS Code extension engineering, security reviewers,  
+**Audience:** Product, CLI engineering, VS Code extension engineering, and security reviewers  
 **Tagline:** One working tree, two repositories, one safe workflow.
 
 ---
