@@ -586,3 +586,88 @@ fn pull_ff_smoke() {
         .success();
     assert!(work.join("extra.md").exists());
 }
+
+/// Remote private companion advances; `pit pull` must fetch private and
+/// materialize the new private path into the local work tree.
+#[test]
+fn pull_fetches_remote_private_change_into_worktree() {
+    let root = tempfile::tempdir().unwrap();
+    let pub_b = root.path().join("public.git");
+    let priv_b = root.path().join("private.git");
+    bare(&pub_b);
+    bare(&priv_b);
+
+    // Workspace A: baseline + push public (and empty/initial private setup)
+    let a = root.path().join("a");
+    init_work(&a, &pub_b, &priv_b);
+    fs::create_dir_all(a.join("private")).unwrap();
+    fs::write(a.join("private/base.txt"), "base\n").unwrap();
+    pit()
+        .current_dir(&a)
+        .args(["add", "--private", "private/base.txt"])
+        .assert()
+        .success();
+    pit()
+        .current_dir(&a)
+        .args(["commit", "-m", "private base"])
+        .assert()
+        .success();
+    pit().current_dir(&a).args(["push"]).assert().success();
+
+    // Workspace B: clone public + setup private (hydrates base)
+    let b = root.path().join("b");
+    assert!(git()
+        .args(["clone", &pub_b.to_string_lossy(), &b.to_string_lossy()])
+        .status()
+        .unwrap()
+        .success());
+    setup_identity(&b);
+    pit()
+        .current_dir(&b)
+        .args([
+            "setup",
+            "--private",
+            &priv_b.to_string_lossy(),
+            "--yes",
+        ])
+        .assert()
+        .success();
+    assert!(
+        b.join("private/base.txt").exists(),
+        "B should hydrate base from private remote"
+    );
+    assert!(!b.join("private/remote_only.txt").exists());
+
+    // Remote private change via A (simulates another machine / remote update)
+    fs::write(a.join("private/remote_only.txt"), "PULL-PRIVATE-CANARY\n").unwrap();
+    pit()
+        .current_dir(&a)
+        .args(["add", "--private", "private/remote_only.txt"])
+        .assert()
+        .success();
+    pit()
+        .current_dir(&a)
+        .args(["commit", "-m", "remote private only"])
+        .assert()
+        .success();
+    pit().current_dir(&a).args(["push"]).assert().success();
+
+    // B must not have the new file until pull
+    assert!(!b.join("private/remote_only.txt").exists());
+
+    pit()
+        .current_dir(&b)
+        .args(["pull", "--yes"])
+        .assert()
+        .success();
+
+    assert!(
+        b.join("private/remote_only.txt").exists(),
+        "pit pull did not materialize remote private file into work tree"
+    );
+    let body = fs::read_to_string(b.join("private/remote_only.txt")).unwrap();
+    assert!(
+        body.contains("PULL-PRIVATE-CANARY"),
+        "wrong private content after pull: {body}"
+    );
+}
