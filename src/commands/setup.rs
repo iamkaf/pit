@@ -1,5 +1,6 @@
 use crate::error::{PitError, Result};
 use crate::git;
+use crate::json_out;
 use crate::workspace::{self, Workspace};
 use std::path::Path;
 use std::process::Command;
@@ -9,6 +10,7 @@ pub struct SetupArgs {
     pub create_github: bool,
     pub yes: bool,
     pub visibility_attested: bool,
+    pub json: bool,
 }
 
 pub fn run(cwd: &Path, args: SetupArgs) -> Result<()> {
@@ -18,15 +20,37 @@ pub fn run(cwd: &Path, args: SetupArgs) -> Result<()> {
     let work_tree = git::find_work_tree(cwd)?;
 
     if let Ok(existing) = Workspace::discover(&work_tree) {
-        println!("Pit workspace already configured at {}", existing.pit_dir.display());
-        println!("Private remote: {}", existing.config.private_remote);
         // refresh exclude + hooks
         crate::exclude::update_managed_exclude(
             &existing.exclude_path(),
             &existing.policy.effective_private_patterns(),
         )?;
         workspace::install_hooks(&existing.work_tree, &existing.public_git_dir, &existing.pit_dir)?;
-        println!("Refreshed managed exclude and hooks.");
+        // Re-hydrate if private remote has content
+        if !existing.config.private_remote.is_empty() {
+            let _ = crate::commands::clone_cmd::hydrate_private(
+                &work_tree,
+                &existing.config.private_remote,
+            );
+        }
+        if args.json {
+            json_out::print_ok(
+                "setup",
+                serde_json::json!({
+                    "already_configured": true,
+                    "path": existing.work_tree,
+                    "private_remote": existing.config.private_remote,
+                    "refreshed": true,
+                }),
+            );
+        } else {
+            println!(
+                "Pit workspace already configured at {}",
+                existing.pit_dir.display()
+            );
+            println!("Private remote: {}", existing.config.private_remote);
+            println!("Refreshed managed exclude and hooks.");
+        }
         return Ok(());
     }
 
@@ -74,18 +98,46 @@ pub fn run(cwd: &Path, args: SetupArgs) -> Result<()> {
 
     let ws = workspace::init_pit_workspace(&work_tree, &private_remote, visibility, None)?;
 
-    println!("Public repository: {}", ws.work_tree.display());
-    println!("Private repository: {}", private_remote);
-    println!("Private visibility: {}", visibility);
-    println!("Default handling for new files: {}", ws.policy.classification.new_files);
-    println!("Hooks installed: pre-commit, pre-push");
-    println!("Managed exclude: updated");
-    println!("Workspace health: run `pit doctor` to verify");
-    println!();
-    println!("Next:");
-    println!("  pit add .");
-    println!("  pit commit -m \"...\"");
-    println!("  pit push");
+    // Hydrate from an already-populated private remote (fetch + materialize files)
+    let hydrated = crate::commands::clone_cmd::hydrate_private(&work_tree, &private_remote);
+    let hydrate_ok = hydrated.is_ok();
+    if let Err(e) = hydrated {
+        // Empty private remote is fine for brand-new companions
+        eprintln!("note: private hydrate skipped or partial: {e}");
+    }
+
+    if args.json {
+        json_out::print_ok(
+            "setup",
+            serde_json::json!({
+                "path": ws.work_tree,
+                "private_remote": private_remote,
+                "private_visibility": visibility,
+                "new_files": ws.policy.classification.new_files,
+                "hooks_installed": true,
+                "hydrated": hydrate_ok,
+            }),
+        );
+    } else {
+        println!("Public repository: {}", ws.work_tree.display());
+        println!("Private repository: {private_remote}");
+        println!("Private visibility: {visibility}");
+        println!(
+            "Default handling for new files: {}",
+            ws.policy.classification.new_files
+        );
+        println!("Hooks installed: pre-commit, pre-push, post-checkout, post-merge, post-rewrite");
+        println!("Managed exclude: updated");
+        if hydrate_ok {
+            println!("Private hydrate: attempted from remote");
+        }
+        println!("Workspace health: run `pit doctor` to verify");
+        println!();
+        println!("Next:");
+        println!("  pit add .");
+        println!("  pit commit -m \"...\"");
+        println!("  pit push");
+    }
     Ok(())
 }
 
@@ -94,21 +146,21 @@ fn looks_like_github(url: &str) -> bool {
 }
 
 fn verify_github_private(url: &str) -> Result<bool> {
-    // Parse owner/repo from common URL forms
     let repo = parse_github_repo(url).ok_or_else(|| PitError::msg("cannot parse GitHub URL"))?;
     let output = Command::new("gh")
         .args(["repo", "view", &repo, "--json", "isPrivate", "-q", ".isPrivate"])
         .output()
         .map_err(|e| PitError::msg(format!("gh failed: {e}")))?;
     if !output.status.success() {
-        return Err(PitError::msg(String::from_utf8_lossy(&output.stderr).to_string()));
+        return Err(PitError::msg(
+            String::from_utf8_lossy(&output.stderr).to_string(),
+        ));
     }
     let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
     Ok(s == "true")
 }
 
 fn parse_github_repo(url: &str) -> Option<String> {
-    // git@github.com:owner/repo.git or https://github.com/owner/repo.git
     let url = url.trim_end_matches('/').trim_end_matches(".git");
     if let Some(rest) = url.strip_prefix("git@github.com:") {
         return Some(rest.to_string());
@@ -123,7 +175,6 @@ fn parse_github_repo(url: &str) -> Option<String> {
 }
 
 fn create_github_private(work_tree: &Path) -> Result<String> {
-    // Derive name from public remote
     let public_url = git::remote_url(work_tree, None, "origin").unwrap_or_default();
     let base = parse_github_repo(&public_url).unwrap_or_else(|| {
         let name = work_tree
@@ -135,23 +186,15 @@ fn create_github_private(work_tree: &Path) -> Result<String> {
     let private_name = format!("{base}-private");
     eprintln!("Creating private GitHub repository {private_name}...");
     let output = Command::new("gh")
-        .args([
-            "repo",
-            "create",
-            &private_name,
-            "--private",
-            "--confirm",
-        ])
+        .args(["repo", "create", &private_name, "--private", "--confirm"])
         .output()
         .map_err(|e| PitError::msg(format!("gh failed: {e}")))?;
     if !output.status.success() {
         let err = String::from_utf8_lossy(&output.stderr);
-        // If already exists, connect it
-        if err.contains("already exists") || err.contains("Name already exists") {
-            eprintln!("Repository already exists; connecting.");
-        } else {
+        if !(err.contains("already exists") || err.contains("Name already exists")) {
             return Err(PitError::msg(format!("gh repo create failed: {err}")));
         }
+        eprintln!("Repository already exists; connecting.");
     }
     Ok(format!("git@github.com:{private_name}.git"))
 }

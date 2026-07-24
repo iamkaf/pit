@@ -1,5 +1,6 @@
 use crate::error::{PitError, Result};
 use crate::git;
+use crate::json_out;
 use crate::transaction::{Transaction, TxState};
 use crate::workspace::Workspace;
 use std::path::Path;
@@ -7,6 +8,7 @@ use std::path::Path;
 pub struct CommitArgs {
     pub message: Option<String>,
     pub dry_run: bool,
+    pub json: bool,
 }
 
 pub fn run(cwd: &Path, args: CommitArgs) -> Result<()> {
@@ -74,9 +76,21 @@ pub fn run(cwd: &Path, args: CommitArgs) -> Result<()> {
     ws.tx_store().save(&tx)?;
 
     if args.dry_run {
-        println!("Would create transaction {}", tx.id);
-        println!("  public paths:  {}", public_staged.len());
-        println!("  private paths: {}", private_staged.len());
+        if args.json {
+            json_out::print_ok(
+                "commit",
+                serde_json::json!({
+                    "dry_run": true,
+                    "id": tx.id,
+                    "public_paths": public_staged.len(),
+                    "private_paths": private_staged.len(),
+                }),
+            );
+        } else {
+            println!("Would create transaction {}", tx.id);
+            println!("  public paths:  {}", public_staged.len());
+            println!("  private paths: {}", private_staged.len());
+        }
         return Ok(());
     }
 
@@ -145,23 +159,37 @@ pub fn run(cwd: &Path, args: CommitArgs) -> Result<()> {
     ws.state.last_private_head = tx.private_after.clone().or(tx.private_before.clone());
     ws.save_state()?;
 
-    println!("Transaction {}", tx.id);
-    match (&tx.public_after, &tx.private_after) {
-        (Some(p), Some(v)) => {
-            println!("  public:  {p}");
-            println!("  private: {v}");
+    if args.json {
+        json_out::print_ok(
+            "commit",
+            serde_json::json!({
+                "id": tx.id,
+                "state": "local-complete",
+                "public": tx.public_after,
+                "private": tx.private_after,
+                "public_paths": tx.public_paths,
+                "private_paths": tx.private_paths,
+            }),
+        );
+    } else {
+        println!("Transaction {}", tx.id);
+        match (&tx.public_after, &tx.private_after) {
+            (Some(p), Some(v)) => {
+                println!("  public:  {p}");
+                println!("  private: {v}");
+            }
+            (Some(p), None) => {
+                println!("  public:  {p}");
+                println!("  private: (none)");
+            }
+            (None, Some(v)) => {
+                println!("  public:  (none)");
+                println!("  private: {v}");
+            }
+            (None, None) => unreachable!(),
         }
-        (Some(p), None) => {
-            println!("  public:  {p}");
-            println!("  private: (none)");
-        }
-        (None, Some(v)) => {
-            println!("  public:  (none)");
-            println!("  private: {v}");
-        }
-        (None, None) => unreachable!(),
+        println!("State: local-complete (run `pit push` to publish)");
     }
-    println!("State: local-complete (run `pit push` to publish)");
     Ok(())
 }
 

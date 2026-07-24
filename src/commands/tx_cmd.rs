@@ -83,6 +83,7 @@ pub fn run(cwd: &Path, action: TxAction, json: bool) -> Result<()> {
                 crate::commands::push::PushArgs {
                     resume: true,
                     dry_run: false,
+                    json,
                 },
             )?;
             if json {

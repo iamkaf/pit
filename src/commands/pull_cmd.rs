@@ -17,11 +17,9 @@ pub fn run(cwd: &Path, args: PullArgs) -> Result<()> {
         ));
     }
 
-    // Dirty check
-    let pub_dirty = !git::status_porcelain(&ws.work_tree, Some(&ws.public_git_dir))?.is_empty();
-    let priv_dirty = git::status_porcelain(&ws.work_tree, Some(&ws.private_git_dir))
-        .map(|s| !s.is_empty())
-        .unwrap_or(false);
+    // Dirty check — ignore untracked for pull decision
+    let pub_dirty = has_tracked_dirty(&ws, true)?;
+    let priv_dirty = has_tracked_dirty(&ws, false)?;
     if (pub_dirty || priv_dirty) && !args.yes {
         return Err(PitError::msg(
             "uncommitted changes present; commit/stash first or re-run with --yes to attempt pull anyway",
@@ -32,9 +30,15 @@ pub fn run(cwd: &Path, args: PullArgs) -> Result<()> {
     let priv_remote = ws.config.private_remote_name.clone();
     let branch = ws.public_branch()?;
 
-    // Fetch both
+    // Fetch both — private fetch failure is fatal if remote is configured
     ws.public_git(&["fetch", &pub_remote])?;
-    let _ = ws.private_git(&["fetch", &priv_remote]);
+    if let Err(e) = ws.private_git(&["fetch", &priv_remote]) {
+        ws.state.branch_mapping_stale = true;
+        ws.save_state()?;
+        return Err(PitError::msg(format!(
+            "private fetch failed (public not pulled): {e}. Mapping marked stale."
+        )));
+    }
 
     // Pull public (ff-only by default)
     match ws.public_git(&["pull", "--ff-only", &pub_remote, &branch]) {
@@ -50,17 +54,16 @@ pub fn run(cwd: &Path, args: PullArgs) -> Result<()> {
         }
     }
 
-    // Update private branch
-    let priv_result = ws.private_git(&["pull", "--ff-only", &priv_remote, &branch]);
-    if let Err(e) = &priv_result {
-        // try checkout tracking
-        let _ = ws.private_git(&[
-            "checkout",
-            "-B",
-            &branch,
-            &format!("{priv_remote}/{branch}"),
-        ]);
-        let _ = e;
+    // Update private branch — fail closed if this fails after public succeeded
+    let priv_ok = update_private_branch(&ws, &priv_remote, &branch);
+    if let Err(e) = priv_ok {
+        ws.state.branch_mapping_stale = true;
+        let _ = ws.save_state();
+        return Err(PitError::msg(format!(
+            "public pull succeeded but private update failed: {e}. \
+             Mapping marked stale; run `pit doctor` / `pit switch {branch}` to reconcile. \
+             Private was not silently treated as success."
+        )));
     }
 
     // Rehydrate private files
@@ -94,4 +97,47 @@ pub fn run(cwd: &Path, args: PullArgs) -> Result<()> {
         println!("Pulled public and private on branch `{branch}`.");
     }
     Ok(())
+}
+
+fn update_private_branch(ws: &Workspace, priv_remote: &str, branch: &str) -> Result<()> {
+    // Prefer ff-only pull when local branch exists
+    match ws.private_git(&["pull", "--ff-only", priv_remote, branch]) {
+        Ok(_) => return Ok(()),
+        Err(e) => {
+            // Fall back to checkout of remote-tracking branch if that is the issue
+            let remote_ref = format!("{priv_remote}/{branch}");
+            match ws.private_git(&["rev-parse", "--verify", &remote_ref]) {
+                Ok(_) => {
+                    ws.private_git(&["checkout", "-B", branch, &remote_ref])
+                        .map_err(|e2| {
+                            PitError::msg(format!(
+                                "private pull failed ({e}); checkout of {remote_ref} also failed: {e2}"
+                            ))
+                        })?;
+                    Ok(())
+                }
+                Err(_) => {
+                    // No remote branch yet — only OK if private has no commits (new empty companion)
+                    if !git::has_commits(&ws.work_tree, Some(&ws.private_git_dir)) {
+                        Ok(())
+                    } else {
+                        Err(PitError::msg(format!(
+                            "private pull failed and remote branch {remote_ref} missing: {e}"
+                        )))
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn has_tracked_dirty(ws: &Workspace, public: bool) -> Result<bool> {
+    let entries = if public {
+        git::status_porcelain(&ws.work_tree, Some(&ws.public_git_dir))?
+    } else if ws.private_git_dir.exists() {
+        git::status_porcelain(&ws.work_tree, Some(&ws.private_git_dir)).unwrap_or_default()
+    } else {
+        return Ok(false);
+    };
+    Ok(entries.iter().any(|e| !e.xy.starts_with('?')))
 }

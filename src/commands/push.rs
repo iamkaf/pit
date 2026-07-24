@@ -1,5 +1,6 @@
 use crate::error::{PitError, Result};
 use crate::git;
+use crate::json_out;
 use crate::transaction::{TxState, Transaction};
 use crate::workspace::Workspace;
 use std::fs;
@@ -8,6 +9,7 @@ use std::path::Path;
 pub struct PushArgs {
     pub resume: bool,
     pub dry_run: bool,
+    pub json: bool,
 }
 
 pub fn run(cwd: &Path, args: PushArgs) -> Result<()> {
@@ -104,9 +106,21 @@ fn push_inner(ws: &Workspace, args: &PushArgs) -> Result<()> {
     }
 
     if args.dry_run {
-        println!("Dry-run push for transaction {}", tx.id);
-        println!("  private first: {:?}", tx.private_after);
-        println!("  public second: {:?}", tx.public_after);
+        if args.json {
+            json_out::print_ok(
+                "push",
+                serde_json::json!({
+                    "dry_run": true,
+                    "id": tx.id,
+                    "private": tx.private_after,
+                    "public": tx.public_after,
+                }),
+            );
+        } else {
+            println!("Dry-run push for transaction {}", tx.id);
+            println!("  private first: {:?}", tx.private_after);
+            println!("  public second: {:?}", tx.public_after);
+        }
         return Ok(());
     }
 
@@ -243,7 +257,21 @@ fn push_inner(ws: &Workspace, args: &PushArgs) -> Result<()> {
         }
     }
 
-    println!("Transaction {} complete", tx.id);
+    if args.json {
+        json_out::print_ok(
+            "push",
+            serde_json::json!({
+                "id": tx.id,
+                "state": "complete",
+                "private_push_ok": tx.private_push_ok,
+                "public_push_ok": tx.public_push_ok,
+                "public": tx.public_after,
+                "private": tx.private_after,
+            }),
+        );
+    } else {
+        println!("Transaction {} complete", tx.id);
+    }
     Ok(())
 }
 

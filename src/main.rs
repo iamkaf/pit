@@ -149,6 +149,7 @@ fn main() -> ExitCode {
                 create_github,
                 yes: cli.yes,
                 visibility_attested: cli.yes,
+                json: cli.json,
             },
         ),
         Commands::Clone {
@@ -228,6 +229,7 @@ fn main() -> ExitCode {
             commands::commit::CommitArgs {
                 message,
                 dry_run: cli.dry_run,
+                json: cli.json,
             },
         ),
         Commands::Push { resume } => commands::push::run(
@@ -235,6 +237,7 @@ fn main() -> ExitCode {
             commands::push::PushArgs {
                 resume,
                 dry_run: cli.dry_run,
+                json: cli.json,
             },
         ),
         Commands::Pull => commands::pull_cmd::run(

@@ -375,6 +375,188 @@ fn clone_with_private_and_canary_roundtrip() {
 }
 
 #[test]
+fn commit_push_setup_json_success_envelope() {
+    let root = tempfile::tempdir().unwrap();
+    let pub_b = root.path().join("p.git");
+    let priv_b = root.path().join("v.git");
+    let work = root.path().join("w");
+    bare(&pub_b);
+    bare(&priv_b);
+    init_work(&work, &pub_b, &priv_b);
+
+    // setup --json on already-configured workspace
+    pit()
+        .current_dir(&work)
+        .args([
+            "setup",
+            "--private",
+            &priv_b.to_string_lossy(),
+            "--yes",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"schema_version\""))
+        .stdout(predicate::str::contains("\"command\": \"setup\""))
+        .stdout(predicate::str::contains("\"ok\": true"));
+
+    fs::create_dir_all(work.join("src")).unwrap();
+    fs::write(work.join("src/j.rs"), "fn j(){}\n").unwrap();
+    pit()
+        .current_dir(&work)
+        .args(["add", "src/j.rs"])
+        .assert()
+        .success();
+    pit()
+        .current_dir(&work)
+        .args(["commit", "-m", "json commit", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"schema_version\""))
+        .stdout(predicate::str::contains("\"command\": \"commit\""))
+        .stdout(predicate::str::contains("\"ok\": true"))
+        .stdout(predicate::str::contains("local-complete"));
+
+    pit()
+        .current_dir(&work)
+        .args(["push", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"schema_version\""))
+        .stdout(predicate::str::contains("\"command\": \"push\""))
+        .stdout(predicate::str::contains("\"ok\": true"))
+        .stdout(predicate::str::contains("complete"));
+}
+
+#[test]
+fn pull_private_failure_is_nonzero() {
+    let root = tempfile::tempdir().unwrap();
+    let pub_b = root.path().join("p.git");
+    let priv_b = root.path().join("v.git");
+    let work = root.path().join("w");
+    bare(&pub_b);
+    bare(&priv_b);
+    init_work(&work, &pub_b, &priv_b);
+
+    // Point private remote at a non-repo path so fetch/pull fails
+    let bad = root.path().join("not-a-remote");
+    fs::create_dir_all(&bad).unwrap();
+    pit()
+        .current_dir(&work)
+        .args([
+            "config",
+            "set",
+            "private.remote",
+            &bad.to_string_lossy(),
+        ])
+        .assert()
+        .success();
+    // sync private git remote URL
+    let _ = StdCommand::new("git")
+        .args([
+            format!("--git-dir={}", work.join(".git/pit/private.git").display()),
+            format!("--work-tree={}", work.display()),
+            "remote".into(),
+            "set-url".into(),
+            "private".into(),
+            bad.to_string_lossy().into_owned(),
+        ])
+        .output()
+        .unwrap();
+
+    pit()
+        .current_dir(&work)
+        .args(["pull", "--yes"])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("private")
+                .and(predicate::str::contains("failed").or(predicate::str::contains("stale"))),
+        );
+}
+
+#[test]
+fn setup_hydrates_existing_private_mirror() {
+    let root = tempfile::tempdir().unwrap();
+    let pub_b = root.path().join("public.git");
+    let priv_b = root.path().join("private.git");
+    bare(&pub_b);
+    bare(&priv_b);
+
+    // First workspace: create private content and push to priv_b
+    let a = root.path().join("a");
+    init_work(&a, &pub_b, &priv_b);
+    fs::create_dir_all(a.join("private")).unwrap();
+    fs::write(a.join("private/secret.txt"), "HYDRATE-CANARY-42\n").unwrap();
+    pit()
+        .current_dir(&a)
+        .args(["add", "--private", "private/secret.txt"])
+        .assert()
+        .success();
+    pit()
+        .current_dir(&a)
+        .args(["commit", "-m", "private secret"])
+        .assert()
+        .success();
+    pit().current_dir(&a).args(["push"]).assert().success();
+
+    // Confirm private bare has the path
+    let listing = StdCommand::new("git")
+        .arg(format!("--git-dir={}", priv_b.display()))
+        .args(["rev-list", "--all", "--objects"])
+        .output()
+        .unwrap();
+    let listing = String::from_utf8_lossy(&listing.stdout);
+    assert!(
+        listing.contains("private/secret.txt"),
+        "private bare missing secret: {listing}"
+    );
+
+    // Second public-only checkout of same public remote, then setup --private
+    let b = root.path().join("b");
+    assert!(git()
+        .args(["clone", &pub_b.to_string_lossy(), &b.to_string_lossy()])
+        .status()
+        .unwrap()
+        .success());
+    setup_identity(&b);
+    assert!(!b.join("private/secret.txt").exists());
+
+    pit()
+        .current_dir(&b)
+        .args([
+            "setup",
+            "--private",
+            &priv_b.to_string_lossy(),
+            "--yes",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("schema_version"));
+
+    assert!(
+        b.join("private/secret.txt").exists(),
+        "setup did not hydrate private/secret.txt into work tree"
+    );
+    let body = fs::read_to_string(b.join("private/secret.txt")).unwrap();
+    assert!(
+        body.contains("HYDRATE-CANARY-42"),
+        "hydrated content wrong: {body}"
+    );
+    // private local repo must have commits after hydrate
+    let has = StdCommand::new("git")
+        .args([
+            format!("--git-dir={}", b.join(".git/pit/private.git").display()),
+            "rev-parse".into(),
+            "HEAD".into(),
+        ])
+        .output()
+        .unwrap();
+    assert!(has.status.success(), "private.git has no HEAD after setup hydrate");
+}
+
+#[test]
 fn pull_ff_smoke() {
     let root = tempfile::tempdir().unwrap();
     let pub_b = root.path().join("p.git");
