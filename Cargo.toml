@@ -5,6 +5,13 @@ edition = "2024"
 description = "One working tree, two repositories, one safe workflow (private Git overlay)"
 license = "MIT"
 readme = "README.md"
+repository = "https://github.com/iamkaf/pit"
+homepage = "https://github.com/iamkaf/pit"
+documentation = "https://github.com/iamkaf/pit#readme"
+authors = ["Kaf <coffeechopdev@gmail.com>"]
+keywords = ["git", "privacy", "cli", "dual-repo"]
+categories = ["command-line-utilities", "development-tools"]
+exclude = ["target/", ".git/", "private/"]
 
 [dependencies]
 anyhow = "1.0.104"

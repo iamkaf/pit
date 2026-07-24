@@ -1,2 +1,16 @@
-/target
+# Build
+/target/
+**/*.rs.bk
+
+# Pit local overlay (never commit; lives under .git/pit anyway)
 .pit/
+
+# Common local noise
+.env
+.env.*
+*.swp
+*.swo
+.DS_Store
+
+# Disposable dogfood leftovers
+dogfood_boundary.txt

@@ -134,7 +134,7 @@ impl Workspace {
         self.public_git_dir.join("info").join("exclude")
     }
 
-    pub fn public_git<'a>(&'a self, args: &[&str]) -> Result<String> {
+    pub fn public_git(&self, args: &[&str]) -> Result<String> {
         git::run_git(
             Some(&self.work_tree),
             Some(&self.public_git_dir),
