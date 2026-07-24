@@ -56,28 +56,45 @@ fn push_inner(ws: &Workspace, args: &PushArgs) -> Result<()> {
         if pending.state == TxState::LocalComplete || pending.is_pending_push() {
             pending
         } else {
-            // create push-only transaction from current HEADs
             make_push_tx(ws)?
         }
     } else {
         make_push_tx(ws)?
     };
 
-    if tx.public_after.is_none() && tx.private_after.is_none() {
-        // use current heads
-        tx.public_after = git::rev_parse(&ws.work_tree, Some(&ws.public_git_dir), "HEAD").ok();
-        tx.private_after = git::rev_parse(&ws.work_tree, Some(&ws.private_git_dir), "HEAD").ok();
+    // CRITICAL: git push sends the branch tip (HEAD), not a stale journal tip.
+    // Always sync public_after/private_after to the tips that the refspecs will
+    // actually publish, then walk remote..that tip before any public push.
+    let public_branch = ws.public_branch().unwrap_or_else(|_| tx.public_branch.clone());
+    let private_branch = ws.private_branch().unwrap_or_else(|_| tx.private_branch.clone());
+    tx.public_branch = public_branch.clone();
+    tx.private_branch = private_branch.clone();
+
+    let public_tip =
+        git::rev_parse(&ws.work_tree, Some(&ws.public_git_dir), "HEAD").ok();
+    let private_tip =
+        git::rev_parse(&ws.work_tree, Some(&ws.private_git_dir), "HEAD").ok();
+
+    if let Some(ref tip) = public_tip {
+        if tx.public_after.as_ref() != Some(tip) {
+            // HEAD moved since the journaled commit — still must validate everything pushed.
+            tx.public_after = Some(tip.clone());
+            store.save(&tx)?;
+        }
+    }
+    if let Some(ref tip) = private_tip {
+        if tx.private_after.as_ref() != Some(tip) {
+            tx.private_after = Some(tip.clone());
+            store.save(&tx)?;
+        }
     }
 
     if tx.public_after.is_none() && tx.private_after.is_none() {
         return Err(PitError::msg("nothing to push"));
     }
 
-    let public_branch = tx.public_branch.clone();
-    let private_branch = tx.private_branch.clone();
-
-    // --- Validate outgoing public range BEFORE any public push ---
-    if let Some(ref public_head) = tx.public_after {
+    // --- Validate exact outgoing public range (remote tip .. HEAD) BEFORE any push ---
+    if let Some(ref public_head) = tx.public_after.clone() {
         validate_public_outbound(ws, public_head, &tx)?;
     }
 
@@ -90,16 +107,14 @@ fn push_inner(ws: &Workspace, args: &PushArgs) -> Result<()> {
 
     // --- Private push first ---
     if !tx.private_push_ok {
-        if let Some(ref _priv_head) = tx.private_after {
+        if tx.private_after.is_some() && git::has_commits(&ws.work_tree, Some(&ws.private_git_dir)) {
             tx.touch(TxState::PrivatePushStarted);
             store.save(&tx)?;
 
             let remote = &ws.config.private_remote_name;
-            // Ensure remote URL is set
             ensure_private_remote(ws)?;
 
             let refspec = format!("refs/heads/{private_branch}:refs/heads/{private_branch}");
-            // Allow hook allowlist if private ever gets hooks
             unsafe {
                 std::env::set_var("PIT_PUSH_IN_PROGRESS", "1");
             }
@@ -118,36 +133,19 @@ fn push_inner(ws: &Workspace, args: &PushArgs) -> Result<()> {
                     println!("Private repository: pushed successfully");
                 }
                 Err(e) => {
-                    // If nothing to push / already up to date, treat as success
                     let msg = e.to_string();
                     if msg.contains("Everything up-to-date") || msg.contains("up to date") {
                         tx.private_push_ok = true;
                         tx.touch(TxState::PrivatePushed);
                         store.save(&tx)?;
                         println!("Private repository: already up-to-date");
-                    } else if tx.private_after.is_some()
-                        && git::rev_parse(&ws.work_tree, Some(&ws.private_git_dir), "HEAD").is_err()
-                    {
-                        // no private commits
-                        tx.private_push_ok = true;
-                        tx.touch(TxState::PrivatePushed);
-                        store.save(&tx)?;
-                        println!("Private repository: nothing to push");
                     } else {
-                        // Check if private has commits
-                        if git::has_commits(&ws.work_tree, Some(&ws.private_git_dir)) {
-                            tx.last_error = Some(msg.clone());
-                            tx.touch(TxState::FailedRecoverable);
-                            store.save(&tx)?;
-                            return Err(PitError::msg(format!(
-                                "private push failed (public not attempted): {msg}"
-                            )));
-                        } else {
-                            tx.private_push_ok = true;
-                            tx.touch(TxState::PrivatePushed);
-                            store.save(&tx)?;
-                            println!("Private repository: no commits yet");
-                        }
+                        tx.last_error = Some(msg.clone());
+                        tx.touch(TxState::FailedRecoverable);
+                        store.save(&tx)?;
+                        return Err(PitError::msg(format!(
+                            "private push failed (public not attempted): {msg}"
+                        )));
                     }
                 }
             }
@@ -164,17 +162,14 @@ fn push_inner(ws: &Workspace, args: &PushArgs) -> Result<()> {
     // --- Public push second ---
     if !tx.public_push_ok {
         if let Some(ref public_head) = tx.public_after.clone() {
-            // Re-validate immediately before public push
-            validate_public_outbound(ws, &public_head, &tx)?;
+            // Re-validate the exact tip that will be published (HEAD), not a stale journal only.
+            validate_public_outbound(ws, public_head, &tx)?;
 
             tx.touch(TxState::PublicPushStarted);
             store.save(&tx)?;
 
             let remote = &ws.config.public_remote_name;
-            // Ensure origin exists
-            let has_origin = ws
-                .public_git(&["remote", "get-url", remote])
-                .is_ok();
+            let has_origin = ws.public_git(&["remote", "get-url", remote]).is_ok();
             if !has_origin {
                 tx.last_error = Some("public remote not configured".into());
                 tx.touch(TxState::FailedRecoverable);
@@ -189,8 +184,7 @@ fn push_inner(ws: &Workspace, args: &PushArgs) -> Result<()> {
             }
 
             let refspec = format!("refs/heads/{public_branch}:refs/heads/{public_branch}");
-            // Bypass pre-push hook block for coordinated pit push (validation already done)
-            // SAFETY: we validated outbound range above; set env for hook allowlist.
+            // Bypass pre-push hook block for coordinated pit push (validation already done).
             unsafe {
                 std::env::set_var("PIT_PUSH_IN_PROGRESS", "1");
             }

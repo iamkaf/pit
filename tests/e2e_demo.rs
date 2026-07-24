@@ -472,14 +472,46 @@ fn pit_meta_not_staged_public_and_push_rejects_leak() {
         "public index tracks .pit path: {public_tracked}"
     );
 
-    // If someone force-stages .pit into public history, pit push must reject
+    // --- Scenario A: pure public-history leak (NOT dual-tracked) ---
+    // Remove .pit from the private index so DualTracked cannot short-circuit
+    // push; outbound walk must be what rejects the path.
+    let _ = StdCommand::new("git")
+        .current_dir(&work)
+        .args([
+            format!("--git-dir={}", work.join(".git/pit/private.git").display()),
+            format!("--work-tree={}", work.display()),
+            "rm".into(),
+            "--cached".into(),
+            "-f".into(),
+            ".pit/policy.toml".into(),
+        ])
+        .output()
+        .unwrap();
+    // Commit the private untrack so dual_tracked is empty
+    let _ = StdCommand::new("git")
+        .current_dir(&work)
+        .env("GIT_AUTHOR_NAME", "Pit Test")
+        .env("GIT_AUTHOR_EMAIL", "pit@test.local")
+        .env("GIT_COMMITTER_NAME", "Pit Test")
+        .env("GIT_COMMITTER_EMAIL", "pit@test.local")
+        .args([
+            format!("--git-dir={}", work.join(".git/pit/private.git").display()),
+            format!("--work-tree={}", work.display()),
+            "commit".into(),
+            "--no-verify".into(),
+            "-m".into(),
+            "untrack policy for dual-clear".into(),
+        ])
+        .output()
+        .unwrap();
+
+    // Force-stage .pit into public history only
     let force = StdCommand::new("git")
         .current_dir(&work)
         .args(["add", "-f", ".pit/policy.toml"])
         .output()
         .unwrap();
     assert!(force.status.success());
-    // Bypass pre-commit to simulate determined leak into public commit
     let commit = StdCommand::new("git")
         .current_dir(&work)
         .env("GIT_AUTHOR_NAME", "Pit Test")
@@ -495,19 +527,166 @@ fn pit_meta_not_staged_public_and_push_rejects_leak() {
         String::from_utf8_lossy(&commit.stderr)
     );
 
-    pit()
-        .current_dir(&work)
-        .args(["push"])
-        .assert()
-        .failure()
-        .stderr(
-            predicate::str::contains(".pit")
-                .or(predicate::str::contains("private metadata"))
-                .or(predicate::str::contains("privacy validation")),
-        );
+    // Prove not dual-tracked: public has .pit, private does not
+    let pub_files = git_in(&work, &["ls-files"]);
+    assert!(
+        pub_files.lines().any(|l| l.starts_with(".pit")),
+        "public must track .pit for this leak scenario"
+    );
+    let priv_files = {
+        let out = StdCommand::new("git")
+            .args([
+                format!("--git-dir={}", work.join(".git/pit/private.git").display()),
+                format!("--work-tree={}", work.display()),
+                "ls-files".into(),
+            ])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+    assert!(
+        !priv_files.lines().any(|l| l.starts_with(".pit")),
+        "private must NOT track .pit so DualTracked cannot mask the bug: {priv_files}"
+    );
 
-    // Public bare remote must still lack .pit/policy.toml
+    let push = pit().current_dir(&work).args(["push"]).output().unwrap();
+    assert!(
+        !push.status.success(),
+        "pit push must reject public .pit history; stdout={} stderr={}",
+        String::from_utf8_lossy(&push.stdout),
+        String::from_utf8_lossy(&push.stderr)
+    );
+    let err = format!(
+        "{}{}",
+        String::from_utf8_lossy(&push.stdout),
+        String::from_utf8_lossy(&push.stderr)
+    );
+    assert!(
+        err.contains("privacy validation")
+            || err.contains("private metadata")
+            || err.contains(".pit"),
+        "expected outbound privacy validation error, got: {err}"
+    );
+    assert!(
+        !err.contains("dual-tracked") && !err.contains("DualTracked"),
+        "test must exercise outbound walk, not dual-tracked short-circuit: {err}"
+    );
+
     let (path_hit, _) =
         public_has_path_or_canary(&public_bare, ".pit/policy.toml", "private/**");
     assert!(!path_hit, "public remote received .pit/policy.toml");
+}
+
+/// Stale journal tip must not skip validation of newer HEAD commits that
+/// `git push` would still publish via refs/heads/<branch>.
+#[test]
+fn push_validates_head_not_stale_journal_tip() {
+    let root = tempfile::tempdir().unwrap();
+    let public_bare = root.path().join("pub.git");
+    let private_bare = root.path().join("priv.git");
+    let work = root.path().join("work");
+    assert!(git()
+        .args(["init", "--bare", "-b", "main", &public_bare.to_string_lossy()])
+        .status()
+        .unwrap()
+        .success());
+    assert!(git()
+        .args(["init", "--bare", "-b", "main", &private_bare.to_string_lossy()])
+        .status()
+        .unwrap()
+        .success());
+    fs::create_dir_all(&work).unwrap();
+    git_in(&work, &["init", "-b", "main"]);
+    setup_identity(&work);
+    git_in(
+        &work,
+        &["remote", "add", "origin", &public_bare.to_string_lossy()],
+    );
+    fs::write(work.join("README.md"), "x\n").unwrap();
+    git_in(&work, &["add", "README.md"]);
+    git_in(&work, &["commit", "-m", "init"]);
+    git_in(&work, &["push", "-u", "origin", "main"]);
+
+    pit()
+        .current_dir(&work)
+        .args([
+            "setup",
+            "--private",
+            &private_bare.to_string_lossy(),
+            "--yes",
+        ])
+        .assert()
+        .success();
+
+    // Clean public-only commit leaves LocalComplete journal with public_after = A
+    fs::create_dir_all(work.join("src")).unwrap();
+    fs::write(work.join("src/ok.rs"), "fn ok() {}\n").unwrap();
+    pit()
+        .current_dir(&work)
+        .args(["add", "src/ok.rs"])
+        .assert()
+        .success();
+    pit()
+        .current_dir(&work)
+        .args(["commit", "-m", "clean public A"])
+        .assert()
+        .success();
+    let tip_a = git_in(&work, &["rev-parse", "HEAD"]);
+
+    // After journal tip A, force a second public commit B that leaks .pit
+    // without dual-tracking (never add .pit to private).
+    fs::create_dir_all(work.join(".pit")).unwrap();
+    fs::write(
+        work.join(".pit/policy.toml"),
+        "version = 1\n# leaked canary POLICY-LEAK-STALE-TIP\n",
+    )
+    .unwrap();
+    git_in(&work, &["add", "-f", ".pit/policy.toml"]);
+    let commit_b = StdCommand::new("git")
+        .current_dir(&work)
+        .env("GIT_AUTHOR_NAME", "Pit Test")
+        .env("GIT_AUTHOR_EMAIL", "pit@test.local")
+        .env("GIT_COMMITTER_NAME", "Pit Test")
+        .env("GIT_COMMITTER_EMAIL", "pit@test.local")
+        .args(["commit", "--no-verify", "-m", "leak after journal tip"])
+        .output()
+        .unwrap();
+    assert!(
+        commit_b.status.success(),
+        "{}",
+        String::from_utf8_lossy(&commit_b.stderr)
+    );
+    let tip_b = git_in(&work, &["rev-parse", "HEAD"]);
+    assert_ne!(tip_a, tip_b, "HEAD must advance past journal tip A");
+
+    // Journal still points at A while HEAD is B — push must still reject B.
+    let push = pit().current_dir(&work).args(["push"]).output().unwrap();
+    assert!(
+        !push.status.success(),
+        "stale journal must not allow leak push; stdout={} stderr={}",
+        String::from_utf8_lossy(&push.stdout),
+        String::from_utf8_lossy(&push.stderr)
+    );
+    let err = format!(
+        "{}{}",
+        String::from_utf8_lossy(&push.stdout),
+        String::from_utf8_lossy(&push.stderr)
+    );
+    assert!(
+        err.contains(".pit")
+            || err.contains("privacy validation")
+            || err.contains("private metadata"),
+        "expected privacy validation of HEAD tip B, got: {err}"
+    );
+
+    let (path_hit, content_hit) = public_has_path_or_canary(
+        &public_bare,
+        ".pit/policy.toml",
+        "POLICY-LEAK-STALE-TIP",
+    );
+    assert!(!path_hit, "public remote has .pit path after stale-tip push");
+    assert!(
+        !content_hit,
+        "public remote has POLICY-LEAK-STALE-TIP after stale-tip push"
+    );
 }
