@@ -76,7 +76,7 @@ Machine-readable output uses a stable envelope: `schema_version`, `command`, `ok
 
 Pit does **not** encrypt the working tree, stop local filesystem readers, or rewrite already-published public history. Hooks are bypassable; `pit push` re-checks.
 
-See [SECURITY.md](./SECURITY.md) for reporting guidance.
+See [SECURITY.md](./SECURITY.md) for supported versions, in-scope issues, and private reporting. See [CONTRIBUTING.md](./CONTRIBUTING.md) for development setup and pull-request expectations.
 
 ## Development
 

@@ -1,34 +1,41 @@
 # Security policy
 
-## What Pit protects
-
-Pit is a **workflow and leak-prevention tool** around two Git repositories:
-
-- Private file contents should not enter the **public** index, object database, commits, or remotes when using Pit commands.
-- `pit push` validates the exact outbound public commit range (`remote..HEAD`) before any public push.
-- Managed excludes and client hooks reduce accidental staging/pushes; they are **not** a hard security boundary.
-
-## What Pit does not protect
-
-- Local filesystem readers (other users/processes with disk access).
-- Bypassing hooks or invoking raw Git plumbing against the public repo.
-- Content that was **already published** publicly (protect does not erase history).
-- Credentials: Pit does not store tokens; use Git/SSH/OS credential helpers.
-- Build tools, IDE indexes, archives, or backups that scan the work tree.
+Pit coordinates public and private Git repositories over one working tree. Please do not disclose a suspected vulnerability in a public issue, discussion, pull request, or chat before it has been investigated and fixed.
 
 ## Reporting a vulnerability
 
-If you believe you have found a security issue in Pit (for example a way for a Pit command to write private content into the public object database or remote):
+Use [GitHub private vulnerability reporting](https://github.com/iamkaf/pit/security/advisories/new) to send the report directly to the maintainer. If that form is unavailable, contact [@iamkaf](https://github.com/iamkaf) without including vulnerability details so a private channel can be established.
 
-1. Prefer a **private** report via GitHub Security Advisories on this repository, or email the maintainer listed in `Cargo.toml` / GitHub profile.
-2. Include a minimal reproduction with local bare remotes if possible.
-3. Do **not** open a public issue with exploit details until a fix is available.
+Please include:
 
-We aim to acknowledge reports promptly and prioritize boundary-integrity bugs.
+- The affected Pit version or commit.
+- Clear reproduction steps, preferably with temporary local bare public/private remotes.
+- The security impact and any conditions required to trigger it.
+- Relevant logs or artifacts with credentials, tokens, and personal information removed.
 
-## Safe dogfooding tips
+You should receive an acknowledgement within seven days. Updates will continue through the private advisory while the report is reproduced, assessed, and fixed.
 
-- Keep instruction files and secrets under private classification / policy patterns.
-- Run `pit doctor` before publishing.
-- Prefer `pit push` over direct `git push` in Pit workspaces.
-- After `pit protect`, assume historical public exposure still exists.
+## Supported versions
+
+Pit is pre-1.0 software. Security fixes target the latest published release (when one exists) and the current `main` branch. Older snapshots and superseded prereleases are not maintained separately; affected users should upgrade to the next compatible release.
+
+## Security-sensitive areas
+
+Reports are especially useful when they involve:
+
+- A Pit command writing private file contents into the public index, object database, commits, tags, or remotes.
+- Private path names or private policy/remote configuration landing in public tracked files by default.
+- `pit push` publishing public history without validating the exact outbound public range (`remote..HEAD`).
+- Unclassified or protected paths being staged or committed publicly under fail-closed policy without an explicit force flag.
+- Hook or dispatcher behavior that silently creates commits, stages private content, or allows incomplete dual-repo publication without a clear error.
+- Recovery or resume paths that rewrite successful remote state or drop durable transaction journals unsafely.
+- Credential, token, or secret material stored by Pit outside the mechanisms Git and the OS already provide.
+
+## Out of scope
+
+The following are outside Pit’s supported threat model (unless a Pit command itself causes them):
+
+- Local processes that can already read the working tree filesystem.
+- Deliberate use of Git plumbing to bypass hooks or the public object database boundary.
+- Content that was already published to a public remote, fork, cache, or package registry.
+- Third-party tools (IDEs, archives, backups, search indexes) that scan the work tree independently of Pit.
