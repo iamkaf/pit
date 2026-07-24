@@ -383,7 +383,18 @@ fn help_lists_phase1_commands() {
         .stdout(predicate::str::contains("add"))
         .stdout(predicate::str::contains("commit"))
         .stdout(predicate::str::contains("push"))
-        .stdout(predicate::str::contains("doctor"));
+        .stdout(predicate::str::contains("doctor"))
+        .stdout(predicate::str::contains("restore"))
+        .stdout(predicate::str::contains("hooks"))
+        .stdout(predicate::str::contains("clone"))
+        .stdout(predicate::str::contains("pull"))
+        .stdout(predicate::str::contains("switch"))
+        .stdout(predicate::str::contains("protect"))
+        .stdout(predicate::str::contains("reveal"))
+        .stdout(predicate::str::contains("ignore"))
+        .stdout(predicate::str::contains("diff"))
+        .stdout(predicate::str::contains("transaction"))
+        .stdout(predicate::str::contains("config"));
 }
 
 /// Regression: after a private commit materializes `.pit/policy.toml`, plain

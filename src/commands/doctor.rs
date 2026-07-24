@@ -1,17 +1,49 @@
 use crate::error::Result;
 use crate::exclude;
 use crate::git;
-use crate::workspace::Workspace;
+use crate::json_out;
+use crate::workspace::{self, Workspace};
 use std::path::Path;
 
-pub fn run(cwd: &Path, json: bool) -> Result<()> {
-    let ws = match Workspace::discover(cwd) {
+pub fn run(cwd: &Path, json: bool, repair: bool) -> Result<()> {
+    let mut ws = match Workspace::discover(cwd) {
         Ok(ws) => ws,
         Err(e) => {
-            println!("Pit doctor: not a Pit workspace ({e})");
+            if json {
+                json_out::print_err("doctor", &format!("not a Pit workspace ({e})"));
+            } else {
+                println!("Pit doctor: not a Pit workspace ({e})");
+            }
             std::process::exit(1);
         }
     };
+
+    let mut repairs: Vec<String> = Vec::new();
+    if repair {
+        // Reversible local repairs only
+        crate::exclude::update_managed_exclude(
+            &ws.exclude_path(),
+            &ws.policy.effective_private_patterns(),
+        )?;
+        repairs.push("managed_exclude refreshed".into());
+        workspace::install_hooks(&ws.work_tree, &ws.public_git_dir, &ws.pit_dir)?;
+        repairs.push("hooks repaired".into());
+        if ws.state.branch_mapping_stale {
+            let pub_b = ws.public_branch().unwrap_or_default();
+            let priv_b = ws.private_branch().unwrap_or_default();
+            if !pub_b.is_empty() && pub_b == priv_b {
+                ws.state.branch_mapping_stale = false;
+                ws.save_state()?;
+                repairs.push("cleared stale mapping (branches already match)".into());
+            } else {
+                repairs.push(format!(
+                    "branch_mapping_stale left set (public={pub_b} private={priv_b}); use pit switch"
+                ));
+            }
+        }
+        ws.config.hooks_installed = true;
+        ws.save_config()?;
+    }
 
     let mut checks: Vec<(String, String, String)> = Vec::new(); // name, status, detail
 
@@ -178,13 +210,16 @@ pub fn run(cwd: &Path, json: bool) -> Result<()> {
     };
 
     if json {
-        let v = serde_json::json!({
-            "health": health,
-            "checks": checks.iter().map(|(n,s,d)| serde_json::json!({
-                "name": n, "status": s, "detail": d
-            })).collect::<Vec<_>>(),
-        });
-        println!("{}", serde_json::to_string_pretty(&v)?);
+        json_out::print_ok(
+            "doctor",
+            serde_json::json!({
+                "health": health,
+                "repairs": repairs,
+                "checks": checks.iter().map(|(n,s,d)| serde_json::json!({
+                    "name": n, "status": s, "detail": d
+                })).collect::<Vec<_>>(),
+            }),
+        );
     } else {
         println!("Pit doctor — {health}");
         println!();
@@ -195,6 +230,13 @@ pub fn run(cwd: &Path, json: bool) -> Result<()> {
                 _ => "ERR ",
             };
             println!("  [{mark}] {name}: {detail}");
+        }
+        if !repairs.is_empty() {
+            println!();
+            println!("Repairs applied:");
+            for r in &repairs {
+                println!("  - {r}");
+            }
         }
         println!();
         if errors > 0 {

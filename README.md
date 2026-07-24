@@ -40,16 +40,20 @@ Result:
 - Private patterns are written into a managed block in `.git/info/exclude`, so plain `git add .` skips them.
 - `pit push` validates the outgoing public history before publishing.
 
-## Commands (Phase 1)
+## Commands
 
 | Command | Purpose |
 |---|---|
 | `pit setup` | Connect private remote, policy, excludes, hooks |
+| `pit clone` | Clone public repo; optional private setup/hydrate |
 | `pit status` | Public / private / unclassified / transactions |
-| `pit add` | Classify and stage into the correct index |
-| `pit commit` | One logical transaction (0–1 public + 0–1 private commits) |
-| `pit push` | Private first, then public; resumable on partial failure |
-| `pit doctor` | Health and privacy invariant checks |
+| `pit add` / `restore --staged` | Classify/stage; unstage correct index |
+| `pit diff` | Public and/or private diffs |
+| `pit commit` | Logical transaction (0–1 public + 0–1 private) |
+| `pit push` / `pull` / `switch` | Publish, fetch both, mapped branches |
+| `pit protect` / `reveal` / `ignore` | Boundary transitions |
+| `pit hooks` / `doctor` | Hook lifecycle; health (+ `--repair`) |
+| `pit transaction` / `config` | Journals; local config |
 
 Global flags: `--json`, `--yes`, `--dry-run`, `--verbose`, `--quiet`.
 

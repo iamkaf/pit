@@ -30,31 +30,50 @@ struct Cli {
 enum Commands {
     /// Connect or create the private mirror, load policy, install hooks
     Setup {
-        /// Private remote URL (path or git URL)
         #[arg(long)]
         private: Option<String>,
-        /// Create a private GitHub companion via `gh`
         #[arg(long)]
         create_github: bool,
+    },
+    /// Clone public repo and optionally set up private companion
+    Clone {
+        public_url: String,
+        #[arg(long)]
+        private: Option<String>,
+        #[arg(long)]
+        directory: Option<String>,
+        #[arg(long)]
+        no_setup: bool,
     },
     /// Show public, private, unclassified, and transaction state
     Status,
     /// Classify and stage paths into the correct index
     Add {
-        /// Paths to add (default: none unless -A)
         paths: Vec<String>,
-        /// Stage all known changes
         #[arg(short = 'A', long = "all")]
         all: bool,
-        /// Force private classification
         #[arg(long)]
         private: bool,
-        /// Force public classification
         #[arg(long)]
         public: bool,
-        /// Force ignore
         #[arg(long)]
         ignore: bool,
+    },
+    /// Unstage paths from the correct index
+    Restore {
+        paths: Vec<String>,
+        #[arg(long)]
+        staged: bool,
+    },
+    /// Show public and/or private diffs
+    Diff {
+        paths: Vec<String>,
+        #[arg(long)]
+        private: bool,
+        #[arg(long)]
+        public: bool,
+        #[arg(long)]
+        staged: bool,
     },
     /// Create a logical transaction (public and/or private commits)
     Commit {
@@ -66,13 +85,50 @@ enum Commands {
         #[arg(long)]
         resume: bool,
     },
+    /// Fetch and update both repositories
+    Pull,
+    /// Switch or create mapped public/private branches
+    Switch {
+        branch: String,
+        #[arg(short = 'c', long = "create")]
+        create: bool,
+    },
+    /// Move a path from public tracking to private
+    Protect {
+        path: String,
+    },
+    /// Move a path from private tracking to public
+    Reveal {
+        path: String,
+    },
+    /// Stop tracking a path in either repository
+    Ignore {
+        path: String,
+    },
     /// Validate workspace health and privacy invariants
-    Doctor,
+    Doctor {
+        #[arg(long)]
+        repair: bool,
+    },
+    /// Manage hook integration
+    Hooks {
+        action: String,
+    },
+    /// Inspect and recover logical transactions
+    Transaction {
+        action: String,
+        id: Option<String>,
+    },
+    /// Manage local configuration
+    Config {
+        action: String,
+        key: Option<String>,
+        value: Option<String>,
+    },
     /// Internal: hook dispatcher entry
     #[command(hide = true)]
     Hook {
         name: String,
-        /// Remaining args from Git (e.g. pre-push remote name/url)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         _rest: Vec<String>,
     },
@@ -93,6 +149,22 @@ fn main() -> ExitCode {
                 create_github,
                 yes: cli.yes,
                 visibility_attested: cli.yes,
+            },
+        ),
+        Commands::Clone {
+            public_url,
+            private,
+            directory,
+            no_setup,
+        } => commands::clone_cmd::run(
+            &cwd,
+            commands::clone_cmd::CloneArgs {
+                public_url,
+                private_url: private,
+                directory,
+                no_setup,
+                yes: cli.yes,
+                json: cli.json,
             },
         ),
         Commands::Status => commands::status::run(&cwd, cli.json),
@@ -124,9 +196,33 @@ fn main() -> ExitCode {
                     all,
                     force,
                     dry_run: cli.dry_run,
+                    json: cli.json,
                 },
             )
         }
+        Commands::Restore { paths, staged } => commands::restore::run(
+            &cwd,
+            commands::restore::RestoreArgs {
+                paths,
+                staged,
+                json: cli.json,
+            },
+        ),
+        Commands::Diff {
+            paths,
+            private,
+            public,
+            staged,
+        } => commands::diff_cmd::run(
+            &cwd,
+            commands::diff_cmd::DiffArgs {
+                paths,
+                private,
+                public,
+                staged,
+                json: cli.json,
+            },
+        ),
         Commands::Commit { message } => commands::commit::run(
             &cwd,
             commands::commit::CommitArgs {
@@ -141,14 +237,132 @@ fn main() -> ExitCode {
                 dry_run: cli.dry_run,
             },
         ),
-        Commands::Doctor => commands::doctor::run(&cwd, cli.json),
+        Commands::Pull => commands::pull_cmd::run(
+            &cwd,
+            commands::pull_cmd::PullArgs {
+                yes: cli.yes,
+                json: cli.json,
+            },
+        ),
+        Commands::Switch { branch, create } => commands::switch_cmd::run(
+            &cwd,
+            commands::switch_cmd::SwitchArgs {
+                branch,
+                create,
+                json: cli.json,
+            },
+        ),
+        Commands::Protect { path } => commands::protect::run(
+            &cwd,
+            commands::protect::ProtectArgs {
+                path,
+                yes: cli.yes,
+                json: cli.json,
+            },
+        ),
+        Commands::Reveal { path } => commands::reveal::run(
+            &cwd,
+            commands::reveal::RevealArgs {
+                path,
+                yes: cli.yes,
+                json: cli.json,
+            },
+        ),
+        Commands::Ignore { path } => commands::ignore_cmd::run(
+            &cwd,
+            commands::ignore_cmd::IgnoreArgs {
+                path,
+                json: cli.json,
+            },
+        ),
+        Commands::Doctor { repair } => commands::doctor::run(&cwd, cli.json, repair),
+        Commands::Hooks { action } => {
+            let act = match commands::hooks_cmd::parse_action(&action) {
+                Ok(a) => a,
+                Err(e) => {
+                    if !cli.quiet {
+                        eprintln!("error: {e}");
+                    }
+                    return ExitCode::from(1);
+                }
+            };
+            commands::hooks_cmd::run(&cwd, act, cli.json)
+        }
+        Commands::Transaction { action, id } => {
+            let act = match action.as_str() {
+                "list" => commands::tx_cmd::TxAction::List,
+                "show" => {
+                    let id = id.unwrap_or_default();
+                    if id.is_empty() {
+                        if !cli.quiet {
+                            eprintln!("error: transaction show requires <id>");
+                        }
+                        return ExitCode::from(1);
+                    }
+                    commands::tx_cmd::TxAction::Show { id }
+                }
+                "resume" => commands::tx_cmd::TxAction::Resume { id },
+                "abort" => {
+                    let id = id.unwrap_or_default();
+                    if id.is_empty() {
+                        if !cli.quiet {
+                            eprintln!("error: transaction abort requires <id>");
+                        }
+                        return ExitCode::from(1);
+                    }
+                    commands::tx_cmd::TxAction::Abort { id }
+                }
+                _ => {
+                    if !cli.quiet {
+                        eprintln!("error: usage: pit transaction list|show|resume|abort");
+                    }
+                    return ExitCode::from(1);
+                }
+            };
+            commands::tx_cmd::run(&cwd, act, cli.json)
+        }
+        Commands::Config { action, key, value } => {
+            let act = match action.as_str() {
+                "list" => commands::config_cmd::ConfigAction::List,
+                "get" => {
+                    let key = key.unwrap_or_default();
+                    if key.is_empty() {
+                        if !cli.quiet {
+                            eprintln!("error: config get requires <key>");
+                        }
+                        return ExitCode::from(1);
+                    }
+                    commands::config_cmd::ConfigAction::Get { key }
+                }
+                "set" => {
+                    let key = key.unwrap_or_default();
+                    let value = value.unwrap_or_default();
+                    if key.is_empty() || value.is_empty() {
+                        if !cli.quiet {
+                            eprintln!("error: config set requires <key> <value>");
+                        }
+                        return ExitCode::from(1);
+                    }
+                    commands::config_cmd::ConfigAction::Set { key, value }
+                }
+                _ => {
+                    if !cli.quiet {
+                        eprintln!("error: usage: pit config get|set|list");
+                    }
+                    return ExitCode::from(1);
+                }
+            };
+            commands::config_cmd::run(&cwd, act, cli.json)
+        }
         Commands::Hook { name, .. } => commands::hook::run(&cwd, &name),
     };
 
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            if !cli.quiet {
+            if cli.json {
+                pit::json_out::print_err("pit", &e.to_string());
+            } else if !cli.quiet {
                 eprintln!("error: {e}");
             }
             let code = match &e {

@@ -151,7 +151,7 @@ impl TxStore {
         Ok(Some(tx))
     }
 
-    pub fn list_pending(&self) -> Result<Vec<Transaction>> {
+    pub fn list_all(&self) -> Result<Vec<Transaction>> {
         self.ensure()?;
         let mut out = Vec::new();
         for entry in fs::read_dir(&self.dir)? {
@@ -163,13 +163,19 @@ impl TxStore {
             }
             let data = fs::read_to_string(entry.path())?;
             if let Ok(tx) = serde_json::from_str::<Transaction>(&data) {
-                if tx.state != TxState::Complete && tx.is_pending_push() {
-                    out.push(tx);
-                }
+                out.push(tx);
             }
         }
         out.sort_by_key(|t| t.created_at);
         Ok(out)
+    }
+
+    pub fn list_pending(&self) -> Result<Vec<Transaction>> {
+        Ok(self
+            .list_all()?
+            .into_iter()
+            .filter(|tx| tx.state != TxState::Complete && tx.is_pending_push())
+            .collect())
     }
 
     pub fn clear_current_if(&self, id: Uuid) -> Result<()> {
@@ -181,6 +187,23 @@ impl TxStore {
             }
         }
         Ok(())
+    }
+
+    pub fn abort(&self, id: Uuid) -> Result<Transaction> {
+        let mut tx = self.load(id)?;
+        if tx.state == TxState::Complete {
+            return Err(PitError::msg("transaction already complete"));
+        }
+        if tx.private_push_ok && !tx.public_push_ok {
+            return Err(PitError::msg(
+                "cannot abort after private push succeeded; use `pit push --resume` or transaction resume",
+            ));
+        }
+        tx.touch(TxState::FailedManual);
+        tx.recovery_hint = Some("aborted by user".into());
+        self.save(&tx)?;
+        self.clear_current_if(id)?;
+        Ok(tx)
     }
 }
 

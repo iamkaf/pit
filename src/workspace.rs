@@ -337,9 +337,16 @@ pub fn install_hooks(work_tree: &Path, public_git_dir: &Path, pit_dir: &Path) ->
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "pit".into());
 
-    for hook_name in &["pre-commit", "pre-push"] {
-        let dispatcher = format!(
-            r#"#!/bin/sh
+    // Fail-closed hooks vs advisory drift hooks
+    let fail_closed = ["pre-commit", "pre-push"];
+    let advisory = ["post-checkout", "post-merge", "post-rewrite"];
+    let all_hooks: Vec<&str> = fail_closed.iter().chain(advisory.iter()).copied().collect();
+
+    for hook_name in &all_hooks {
+        let fail_closed_hook = fail_closed.contains(hook_name);
+        let dispatcher = if fail_closed_hook {
+            format!(
+                r#"#!/bin/sh
 # Pit hook dispatcher — chains user hooks and enforces privacy guards.
 HOOK_NAME="{hook_name}"
 PIT_BIN="{pit_bin}"
@@ -355,10 +362,30 @@ if [ -x "$USER_HOOK" ]; then
 fi
 exit 0
 "#,
-            hook_name = hook_name,
-            pit_bin = pit_bin,
-            hooks_dir = hooks_dir.display(),
-        );
+                hook_name = hook_name,
+                pit_bin = pit_bin,
+                hooks_dir = hooks_dir.display(),
+            )
+        } else {
+            format!(
+                r#"#!/bin/sh
+# Pit hook dispatcher — drift detection (advisory; always chains user hook).
+HOOK_NAME="{hook_name}"
+PIT_BIN="{pit_bin}"
+USER_HOOK="{hooks_dir}/{hook_name}.user"
+if [ -x "$PIT_BIN" ] || command -v "$PIT_BIN" >/dev/null 2>&1; then
+  "$PIT_BIN" hook "$HOOK_NAME" "$@" || true
+fi
+if [ -x "$USER_HOOK" ]; then
+  exec "$USER_HOOK" "$@"
+fi
+exit 0
+"#,
+                hook_name = hook_name,
+                pit_bin = pit_bin,
+                hooks_dir = hooks_dir.display(),
+            )
+        };
         let hook_path = hooks_dir.join(hook_name);
         // Preserve existing non-pit hook as .user
         if hook_path.exists() {
@@ -385,7 +412,62 @@ exit 0
             perms.set_mode(0o755);
             fs::set_permissions(&hook_path, perms)?;
         }
-        let _ = work_tree; // reserved
+        let _ = work_tree;
     }
     Ok(())
+}
+
+pub fn uninstall_hooks(public_git_dir: &Path) -> Result<()> {
+    let hooks_dir = public_git_dir.join("hooks");
+    for hook_name in &[
+        "pre-commit",
+        "pre-push",
+        "post-checkout",
+        "post-merge",
+        "post-rewrite",
+    ] {
+        let hook_path = hooks_dir.join(hook_name);
+        if hook_path.exists() {
+            let existing = fs::read_to_string(&hook_path).unwrap_or_default();
+            if existing.contains("Pit hook dispatcher") {
+                fs::remove_file(&hook_path)?;
+                let user_path = hooks_dir.join(format!("{hook_name}.user"));
+                if user_path.exists() {
+                    fs::rename(&user_path, &hook_path)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn hooks_status(public_git_dir: &Path) -> Vec<(String, String)> {
+    let hooks_dir = public_git_dir.join("hooks");
+    let mut out = Vec::new();
+    for hook_name in &[
+        "pre-commit",
+        "pre-push",
+        "post-checkout",
+        "post-merge",
+        "post-rewrite",
+    ] {
+        let hook_path = hooks_dir.join(hook_name);
+        let status = if !hook_path.exists() {
+            "missing".into()
+        } else {
+            let text = fs::read_to_string(&hook_path).unwrap_or_default();
+            if text.contains("Pit hook dispatcher") {
+                let user = hooks_dir.join(format!("{hook_name}.user"));
+                if user.exists() {
+                    "pit+user".into()
+                } else {
+                    "pit".into()
+                }
+            } else {
+                "foreign".into()
+            }
+        };
+        out.push(((*hook_name).to_string(), status));
+    }
+    out
 }

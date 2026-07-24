@@ -202,7 +202,7 @@ impl PolicyMatcher {
     }
 }
 
-fn normalize_path(path: &str) -> String {
+pub fn normalize_path(path: &str) -> String {
     path.trim_start_matches("./").replace('\\', "/")
 }
 
@@ -279,5 +279,31 @@ mod tests {
         let m = Policy::default().matcher().unwrap();
         assert_eq!(m.classify("target/debug/pit"), Class::Ignored);
         assert_eq!(m.classify("tmp/x"), Class::Ignored);
+    }
+
+    #[test]
+    fn path_normalization_slashes() {
+        let m = Policy::default().matcher().unwrap();
+        assert_eq!(m.classify("./private/notes.txt"), Class::Private);
+        assert_eq!(m.classify("src\\app.rs".replace('\\', "/").as_str()), Class::Public);
+    }
+
+    /// Case-collision hazard: two paths that differ only by case must not be
+    /// classified into opposite repos without notice. Matcher is case-sensitive
+    /// (Git default on Linux); policy authors must use explicit patterns.
+    #[test]
+    fn case_sensitive_classification_by_default() {
+        let mut p = Policy::default();
+        p.private.patterns.push("Secret.md".into());
+        let m = p.matcher().unwrap();
+        assert_eq!(m.classify("Secret.md"), Class::Private);
+        // Different case is NOT automatically private on case-sensitive FS
+        assert_ne!(m.classify("secret.md"), Class::Private);
+    }
+
+    #[test]
+    fn normalize_path_strips_dot_slash() {
+        assert_eq!(super::normalize_path("./foo/bar"), "foo/bar");
+        assert_eq!(super::normalize_path("foo\\bar"), "foo/bar");
     }
 }

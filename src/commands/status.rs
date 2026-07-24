@@ -116,22 +116,25 @@ pub fn run(cwd: &Path, json: bool) -> Result<()> {
     };
 
     if json {
-        let v = serde_json::json!({
-            "public_branch": public_branch,
-            "private_branch": private_branch,
-            "health": health,
-            "public_staged": public_staged,
-            "public_unstaged": public_unstaged,
-            "private_staged": private_staged,
-            "private_unstaged": private_unstaged,
-            "unclassified": unclassified,
-            "dual_tracked": dual,
-            "transactions": pending.iter().map(|t| serde_json::json!({
-                "id": t.id,
-                "state": format!("{:?}", t.state),
-            })).collect::<Vec<_>>(),
-        });
-        println!("{}", serde_json::to_string_pretty(&v)?);
+        crate::json_out::print_ok(
+            "status",
+            serde_json::json!({
+                "public_branch": public_branch,
+                "private_branch": private_branch,
+                "health": health,
+                "public_staged": public_staged,
+                "public_unstaged": public_unstaged,
+                "private_staged": private_staged,
+                "private_unstaged": private_unstaged,
+                "unclassified": unclassified,
+                "dual_tracked": dual,
+                "branch_mapping_stale": ws.state.branch_mapping_stale,
+                "transactions": pending.iter().map(|t| serde_json::json!({
+                    "id": t.id,
+                    "state": format!("{:?}", t.state),
+                })).collect::<Vec<_>>(),
+            }),
+        );
         return Ok(());
     }
 

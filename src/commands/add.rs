@@ -18,6 +18,7 @@ pub struct AddArgs {
     pub all: bool,
     pub force: ForceClass,
     pub dry_run: bool,
+    pub json: bool,
 }
 
 pub fn run(cwd: &Path, args: AddArgs) -> Result<()> {
@@ -31,7 +32,11 @@ pub fn run(cwd: &Path, args: AddArgs) -> Result<()> {
 
     let candidates = collect_candidates(&ws, &args)?;
     if candidates.is_empty() {
-        println!("Nothing specified, nothing added.");
+        if args.json {
+            crate::json_out::print_ok("add", serde_json::json!({ "staged": false, "reason": "nothing" }));
+        } else {
+            println!("Nothing specified, nothing added.");
+        }
         return Ok(());
     }
 
@@ -63,6 +68,25 @@ pub fn run(cwd: &Path, args: AddArgs) -> Result<()> {
             Class::Private => private_paths.push(path.clone()),
             Class::Ignored => ignored_paths.push(path.clone()),
             Class::Unclassified => unclassified.push(path.clone()),
+        }
+    }
+
+    // Interactive prompt when policy is prompt + TTY
+    if !unclassified.is_empty()
+        && args.force == ForceClass::None
+        && ws.policy.classification.new_files == "prompt"
+    {
+        if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            let remaining = prompt_classify(&unclassified)?;
+            for (path, class) in remaining {
+                match class {
+                    Class::Public => public_paths.push(path),
+                    Class::Private => private_paths.push(path),
+                    Class::Ignored => ignored_paths.push(path),
+                    Class::Unclassified => {}
+                }
+            }
+            unclassified.clear();
         }
     }
 
@@ -118,27 +142,83 @@ pub fn run(cwd: &Path, args: AddArgs) -> Result<()> {
         return Err(e);
     }
 
-    println!(
-        "Staged {} public, {} private path(s).",
-        public_paths.len(),
-        private_paths.len()
-    );
-    if !public_paths.is_empty() {
-        println!("Public:");
-        for p in &public_paths {
-            println!("  {p}");
+    if args.json {
+        crate::json_out::print_ok(
+            "add",
+            serde_json::json!({
+                "public": public_paths,
+                "private": private_paths,
+                "ignored": ignored_paths,
+            }),
+        );
+    } else {
+        println!(
+            "Staged {} public, {} private path(s).",
+            public_paths.len(),
+            private_paths.len()
+        );
+        if !public_paths.is_empty() {
+            println!("Public:");
+            for p in &public_paths {
+                println!("  {p}");
+            }
         }
-    }
-    if !private_paths.is_empty() {
-        println!("Private:");
-        for p in &private_paths {
-            println!("  {p}");
+        if !private_paths.is_empty() {
+            println!("Private:");
+            for p in &private_paths {
+                println!("  {p}");
+            }
         }
-    }
-    if !ignored_paths.is_empty() {
-        println!("Skipped ignored: {}", ignored_paths.join(", "));
+        if !ignored_paths.is_empty() {
+            println!("Skipped ignored: {}", ignored_paths.join(", "));
+        }
     }
     Ok(())
+}
+
+/// Prompt user for each unclassified path. Returns classifications (skip → dropped).
+pub fn prompt_classify(paths: &[String]) -> Result<Vec<(String, Class)>> {
+    use std::io::{self, Write};
+    let mut out = Vec::new();
+    println!("Unclassified files:");
+    for p in paths {
+        println!("  {p}");
+    }
+    for p in paths {
+        eprint!("Classify {p}: [p]rivate  [u]public  [i]gnore  [s]kip  ");
+        let _ = io::stderr().flush();
+        let mut line = String::new();
+        io::stdin().read_line(&mut line)?;
+        match line.trim().to_ascii_lowercase().as_str() {
+            "p" | "private" => out.push((p.clone(), Class::Private)),
+            "u" | "public" => out.push((p.clone(), Class::Public)),
+            "i" | "ignore" => out.push((p.clone(), Class::Ignored)),
+            "s" | "skip" | "" => {}
+            _ => {
+                return Err(PitError::msg(format!(
+                    "unrecognized classification for {p}; aborting"
+                )));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Whether interactive prompt mode should activate (unit-testable).
+pub fn should_prompt_interactive(new_files_mode: &str, stdin_is_tty: bool) -> bool {
+    new_files_mode == "prompt" && stdin_is_tty
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    use super::*;
+
+    #[test]
+    fn prompt_mode_requires_tty() {
+        assert!(should_prompt_interactive("prompt", true));
+        assert!(!should_prompt_interactive("prompt", false));
+        assert!(!should_prompt_interactive("reject", true));
+    }
 }
 
 fn collect_candidates(ws: &Workspace, args: &AddArgs) -> Result<Vec<String>> {

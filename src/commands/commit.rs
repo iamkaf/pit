@@ -43,12 +43,17 @@ pub fn run(cwd: &Path, args: CommitArgs) -> Result<()> {
         Vec::new()
     };
 
-    // Validate no private paths in public staged
+    // Validate no private paths being *added/modified* in public index.
+    // Deletions (status D) are allowed so `pit protect` can land a public removal.
     let matcher = ws.policy.matcher()?;
-    for p in &public_staged {
-        if matcher.is_private_pattern_match(p) {
+    let public_name_status = ws
+        .public_git(&["diff", "--cached", "--name-status", "-z"])
+        .unwrap_or_default();
+    for entry in parse_name_status_z(&public_name_status) {
+        if entry.status != "D" && matcher.is_private_pattern_match(&entry.path) {
             return Err(PitError::PrivacyValidation(format!(
-                "private path staged in public index: {p}"
+                "private path staged in public index: {}",
+                entry.path
             )));
         }
     }
@@ -158,6 +163,34 @@ pub fn run(cwd: &Path, args: CommitArgs) -> Result<()> {
     }
     println!("State: local-complete (run `pit push` to publish)");
     Ok(())
+}
+
+struct NameStatus {
+    status: String,
+    path: String,
+}
+
+fn parse_name_status_z(s: &str) -> Vec<NameStatus> {
+    let mut out = Vec::new();
+    let mut parts = s.split('\0').filter(|p| !p.is_empty());
+    while let Some(chunk) = parts.next() {
+        // format: "M\tpath" or "R100\told" then new path — simplified
+        if let Some((st, path)) = chunk.split_once('\t') {
+            let status = st.chars().next().unwrap_or('M').to_string();
+            out.push(NameStatus {
+                status,
+                path: path.to_string(),
+            });
+        } else if chunk.len() >= 2 {
+            // fallback "Mpath" unlikely with -z name-status
+            let status = chunk.chars().next().unwrap_or('M').to_string();
+            let path = chunk[1..].trim().to_string();
+            if !path.is_empty() {
+                out.push(NameStatus { status, path });
+            }
+        }
+    }
+    out
 }
 
 fn ensure_private_policy_staged(ws: &Workspace) -> Result<()> {

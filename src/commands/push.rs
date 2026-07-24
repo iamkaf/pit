@@ -29,6 +29,11 @@ pub fn run(cwd: &Path, args: PushArgs) -> Result<()> {
 }
 
 fn push_inner(ws: &Workspace, args: &PushArgs) -> Result<()> {
+    if ws.state.branch_mapping_stale {
+        return Err(PitError::msg(
+            "branch mapping is stale; run `pit switch` or `pit doctor --repair` before push",
+        ));
+    }
     let dual = ws.dual_tracked()?;
     if !dual.is_empty() {
         return Err(PitError::DualTracked(dual));
