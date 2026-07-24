@@ -69,8 +69,6 @@ Pit does **not** encrypt the working tree or stop local filesystem readers. Hook
 cargo test
 ```
 
-See [pit-product-requirements.md](./pit-product-requirements.md) for product requirements.
-
 ## License
 
 MIT
