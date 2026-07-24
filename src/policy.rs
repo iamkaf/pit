@@ -54,6 +54,9 @@ impl Default for Policy {
                     "private/**".into(),
                     "notes/internal/**".into(),
                     "config/*.secret".into(),
+                    // Work-tree private metadata (policy hydration); never public
+                    ".pit".into(),
+                    ".pit/**".into(),
                     ".git/pit-worktree-metadata/**".into(),
                 ],
             },
@@ -100,11 +103,30 @@ impl Policy {
     }
 
     pub fn matcher(&self) -> Result<PolicyMatcher> {
-        PolicyMatcher::new(self)
+        // Matcher always honors mandatory private patterns (e.g. .pit/**).
+        let mut effective = self.clone();
+        effective.private.patterns = self.effective_private_patterns();
+        PolicyMatcher::new(&effective)
     }
 
     pub fn all_private_patterns(&self) -> &[String] {
         &self.private.patterns
+    }
+
+    /// Patterns that must always be private regardless of user policy edits.
+    pub fn mandatory_private_patterns() -> &'static [&'static str] {
+        &[".pit", ".pit/**", ".git/pit-worktree-metadata/**"]
+    }
+
+    /// Private patterns for managed exclude / validation, including mandatory ones.
+    pub fn effective_private_patterns(&self) -> Vec<String> {
+        let mut out = self.private.patterns.clone();
+        for m in Self::mandatory_private_patterns() {
+            if !out.iter().any(|p| p == m) {
+                out.push((*m).to_string());
+            }
+        }
+        out
     }
 }
 
@@ -216,6 +238,17 @@ mod tests {
         assert_eq!(m.classify("private/deep/a.md"), Class::Private);
         assert_eq!(m.classify(".env"), Class::Private);
         assert_eq!(m.classify(".env.local"), Class::Private);
+        assert_eq!(m.classify(".pit/policy.toml"), Class::Private);
+        assert_eq!(m.classify(".pit"), Class::Private);
+    }
+
+    #[test]
+    fn effective_private_includes_mandatory_even_if_stripped() {
+        let mut p = Policy::default();
+        p.private.patterns.retain(|x| !x.starts_with(".pit"));
+        let eff = p.effective_private_patterns();
+        assert!(eff.iter().any(|x| x == ".pit/**"));
+        assert!(eff.iter().any(|x| x == ".pit"));
     }
 
     #[test]

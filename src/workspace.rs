@@ -309,7 +309,7 @@ pub fn init_pit_workspace(
     // Managed exclude
     crate::exclude::update_managed_exclude(
         &public_git_dir.join("info").join("exclude"),
-        policy.all_private_patterns(),
+        &policy.effective_private_patterns(),
     )?;
 
     // Install hooks (non-destructive)

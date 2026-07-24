@@ -303,7 +303,13 @@ pub fn validate_public_outbound(ws: &Workspace, public_head: &str, tx: &Transact
         if matcher.is_private_pattern_match(p) {
             violations.push(format!("protected/private path in public history: {p}"));
         }
-        if p.starts_with(".git/pit") || p == ".git/pit/config.toml" {
+        // Hard-coded: Pit metadata must never appear in public history even if
+        // a workspace's policy cache was stripped of these patterns.
+        if p == ".pit"
+            || p.starts_with(".pit/")
+            || p.starts_with(".git/pit")
+            || p == ".git/pit/config.toml"
+        {
             violations.push(format!("pit private metadata in public history: {p}"));
         }
     }

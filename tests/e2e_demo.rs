@@ -385,3 +385,129 @@ fn help_lists_phase1_commands() {
         .stdout(predicate::str::contains("push"))
         .stdout(predicate::str::contains("doctor"));
 }
+
+/// Regression: after a private commit materializes `.pit/policy.toml`, plain
+/// `git add .` must not stage it into the public index, and `pit push` must
+/// reject it if it ever appears in public history.
+#[test]
+fn pit_meta_not_staged_public_and_push_rejects_leak() {
+    let root = tempfile::tempdir().unwrap();
+    let public_bare = root.path().join("pub.git");
+    let private_bare = root.path().join("priv.git");
+    let work = root.path().join("work");
+    assert!(git()
+        .args(["init", "--bare", "-b", "main", &public_bare.to_string_lossy()])
+        .status()
+        .unwrap()
+        .success());
+    assert!(git()
+        .args(["init", "--bare", "-b", "main", &private_bare.to_string_lossy()])
+        .status()
+        .unwrap()
+        .success());
+    fs::create_dir_all(&work).unwrap();
+    git_in(&work, &["init", "-b", "main"]);
+    setup_identity(&work);
+    git_in(
+        &work,
+        &["remote", "add", "origin", &public_bare.to_string_lossy()],
+    );
+    fs::write(work.join("README.md"), "x\n").unwrap();
+    git_in(&work, &["add", "README.md"]);
+    git_in(&work, &["commit", "-m", "init"]);
+    git_in(&work, &["push", "-u", "origin", "main"]);
+
+    pit()
+        .current_dir(&work)
+        .args([
+            "setup",
+            "--private",
+            &private_bare.to_string_lossy(),
+            "--yes",
+        ])
+        .assert()
+        .success();
+
+    // Private-only commit creates `.pit/policy.toml` in the work tree
+    fs::create_dir_all(work.join("private")).unwrap();
+    fs::write(work.join("private/notes.txt"), "secret\n").unwrap();
+    pit()
+        .current_dir(&work)
+        .args(["add", "--private", "private/notes.txt"])
+        .assert()
+        .success();
+    pit()
+        .current_dir(&work)
+        .args(["commit", "-m", "private notes"])
+        .assert()
+        .success();
+
+    assert!(
+        work.join(".pit/policy.toml").exists(),
+        "private commit must materialize .pit/policy.toml"
+    );
+
+    // Managed exclude must list .pit/**
+    let exclude = fs::read_to_string(work.join(".git/info/exclude")).unwrap();
+    assert!(
+        exclude.contains(".pit/**"),
+        "managed exclude missing .pit/**: {exclude}"
+    );
+
+    // Plain git add must not stage policy into the public index
+    let add_out = StdCommand::new("git")
+        .current_dir(&work)
+        .args(["add", "."])
+        .output()
+        .unwrap();
+    assert!(add_out.status.success(), "git add . failed");
+    let staged = git_in(&work, &["diff", "--cached", "--name-only"]);
+    assert!(
+        !staged.contains(".pit"),
+        "git add . staged pit metadata into public index: {staged}"
+    );
+    let public_tracked = git_in(&work, &["ls-files"]);
+    assert!(
+        !public_tracked.lines().any(|l| l.starts_with(".pit")),
+        "public index tracks .pit path: {public_tracked}"
+    );
+
+    // If someone force-stages .pit into public history, pit push must reject
+    let force = StdCommand::new("git")
+        .current_dir(&work)
+        .args(["add", "-f", ".pit/policy.toml"])
+        .output()
+        .unwrap();
+    assert!(force.status.success());
+    // Bypass pre-commit to simulate determined leak into public commit
+    let commit = StdCommand::new("git")
+        .current_dir(&work)
+        .env("GIT_AUTHOR_NAME", "Pit Test")
+        .env("GIT_AUTHOR_EMAIL", "pit@test.local")
+        .env("GIT_COMMITTER_NAME", "Pit Test")
+        .env("GIT_COMMITTER_EMAIL", "pit@test.local")
+        .args(["commit", "--no-verify", "-m", "forced policy leak"])
+        .output()
+        .unwrap();
+    assert!(
+        commit.status.success(),
+        "forced commit failed: {}",
+        String::from_utf8_lossy(&commit.stderr)
+    );
+
+    pit()
+        .current_dir(&work)
+        .args(["push"])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains(".pit")
+                .or(predicate::str::contains("private metadata"))
+                .or(predicate::str::contains("privacy validation")),
+        );
+
+    // Public bare remote must still lack .pit/policy.toml
+    let (path_hit, _) =
+        public_has_path_or_canary(&public_bare, ".pit/policy.toml", "private/**");
+    assert!(!path_hit, "public remote received .pit/policy.toml");
+}

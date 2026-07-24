@@ -88,7 +88,7 @@ pub fn run(cwd: &Path, args: AddArgs) -> Result<()> {
     // Ensure managed exclude is current so git add doesn't pick up private
     crate::exclude::update_managed_exclude(
         &ws.exclude_path(),
-        ws.policy.all_private_patterns(),
+        &ws.policy.effective_private_patterns(),
     )?;
 
     // Snapshot for rollback

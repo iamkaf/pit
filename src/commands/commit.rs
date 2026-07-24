@@ -161,16 +161,20 @@ pub fn run(cwd: &Path, args: CommitArgs) -> Result<()> {
 }
 
 fn ensure_private_policy_staged(ws: &Workspace) -> Result<()> {
-    // Copy policy into work tree private path `.pit/policy.toml` only if we use that.
-    // For MVP, store under private git as a blob via hash-object + update-index without
-    // putting policy in the public-visible work tree root if possible.
-    // Simplest: write to `.pit/policy.toml` which should be private-classified.
+    // Copy authoritative policy into work-tree path `.pit/policy.toml` for the
+    // private mirror only. `.pit/**` is a mandatory private pattern and is
+    // always present in the managed exclude block (see Policy::effective_private_patterns).
     let pit_meta = ws.work_tree.join(".pit");
     std::fs::create_dir_all(&pit_meta)?;
     let dest = pit_meta.join("policy.toml");
     std::fs::copy(ws.pit_dir.join("policy.toml"), &dest)?;
-    // Ensure .pit/** is private
-    // Stage it
-    let _ = ws.private_git(&["add", "-f", "--", ".pit/policy.toml"]);
+
+    // Refresh managed exclude so plain `git add` cannot stage policy into public.
+    crate::exclude::update_managed_exclude(
+        &ws.exclude_path(),
+        &ws.policy.effective_private_patterns(),
+    )?;
+
+    ws.private_git(&["add", "-f", "--", ".pit/policy.toml"])?;
     Ok(())
 }

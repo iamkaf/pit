@@ -23,7 +23,7 @@ pub fn run(cwd: &Path, args: SetupArgs) -> Result<()> {
         // refresh exclude + hooks
         crate::exclude::update_managed_exclude(
             &existing.exclude_path(),
-            existing.policy.all_private_patterns(),
+            &existing.policy.effective_private_patterns(),
         )?;
         workspace::install_hooks(&existing.work_tree, &existing.public_git_dir, &existing.pit_dir)?;
         println!("Refreshed managed exclude and hooks.");

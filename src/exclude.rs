@@ -24,9 +24,12 @@ pub fn update_managed_exclude(exclude_path: &Path, private_patterns: &[String]) 
         block.push_str(p);
         block.push('\n');
     }
-    // Always exclude pit internal metadata from public staging
-    if !private_patterns.iter().any(|p| p.contains("pit-worktree")) {
-        block.push_str(".git/pit-worktree-metadata/**\n");
+    // Always exclude Pit work-tree metadata even if caller omitted it
+    for mandatory in [".pit", ".pit/**", ".git/pit-worktree-metadata/**"] {
+        if !private_patterns.iter().any(|p| p == mandatory) {
+            block.push_str(mandatory);
+            block.push('\n');
+        }
     }
     block.push_str(END_MARKER);
     block.push('\n');
@@ -112,5 +115,18 @@ mod tests {
         assert_eq!(text.matches(BEGIN_MARKER).count(), 1);
         assert!(text.contains("keep-me"));
         assert!(text.contains(".env"));
+    }
+
+    #[test]
+    fn always_includes_pit_metadata_patterns() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("exclude");
+        update_managed_exclude(&path, &["private/**".into()]).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains(".pit/**"), "managed exclude must block .pit/**");
+        assert!(
+            text.lines().any(|l| l.trim() == ".pit"),
+            "managed exclude must block .pit directory entry"
+        );
     }
 }
